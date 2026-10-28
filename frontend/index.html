@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>中国地震台站与事件可视化平台</title>
+  
+  <!-- 【重要替换】：把 unpkg 换成国内极速的 BootCDN -->
+  <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+  <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css"/>
+  <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css"/>
+  
+  <style>
+    body { margin: 0; font-family: 'Segoe UI', sans-serif; overflow: hidden; background-color: #f7f9fc; }
+    #map { height: 100vh; width: 100%; z-index: 1; }
+    
+    /* 悬浮面板 */
+    #panel {
+      position: absolute; top: 20px; left: 20px; z-index: 1000;
+      background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(12px);
+      padding: 16px 20px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+      width: 480px; border: 1px solid rgba(255,255,255,0.6);
+      display: flex; flex-direction: column;
+    }
+    
+    /* 拖拽把手 */
+    #panel-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 12px; cursor: move; border-bottom: 1px solid #ebeef5; padding-bottom: 10px;
+    }
+    #panel-header h3 { margin: 0; font-size: 16px; color: #303133; font-weight: 600; }
+    #panel-header span { font-size: 12px; color: #909399; }
+    
+    /* 搜索区 */
+    .search-box { display: flex; gap: 8px; margin-bottom: 12px; }
+    #province-select { padding: 10px; border: 1px solid #dcdfe6; border-radius: 6px; outline: none; background: #fff; color: #606266; width: 100px; font-size: 13px;}
+    #ai-input { flex: 1; padding: 10px; border: 1px solid #dcdfe6; border-radius: 6px; outline: none; font-size: 13px; transition: border-color 0.2s; }
+    #ai-input:focus { border-color: #409eff; box-shadow: 0 0 0 2px rgba(64,158,255,0.2); }
+    button { padding: 10px 18px; background-color: #409eff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px; transition: background-color 0.2s;}
+    button:hover { background-color: #66b1ff; }
+    
+    /* AI 解析结果 */
+    #ai-result { font-size: 13px; color: #67c23a; margin-bottom: 12px; min-height: 18px; font-weight: 500;}
+    
+    /* 列表区 */
+    #list-container { max-height: 320px; overflow-y: auto; border: 1px solid #ebeef5; border-radius: 8px; background: #fff; }
+    #list-container::-webkit-scrollbar { width: 6px; }
+    #list-container::-webkit-scrollbar-thumb { background: #c0c4cc; border-radius: 3px; }
+    #list-container::-webkit-scrollbar-track { background: #f5f7fa; }
+    
+    /* 列表项 */
+    .event-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; font-size: 13px; border-bottom: 1px solid #ebeef5; color: #606266; }
+    .event-item:last-child { border-bottom: none; }
+    .event-item:nth-child(even) { background-color: #fafafa; }
+    .event-item:hover { background-color: #f0f9eb; }
+    
+    /* 震级标签 */
+    .mag-tag { font-weight: bold; color: #fff; padding: 2px 8px; border-radius: 12px; font-size: 12px; min-width: 38px; text-align: center; }
+    .mag-high { background-color: #f56c6c; } .mag-mid { background-color: #e6a23c; } .mag-low { background-color: #67c23a; }
+    .coord { color: #909399; font-family: monospace; font-size: 12px; }
+    
+    /* 空状态提示 */
+    .empty-msg { padding: 20px; text-align: center; color: #909399; font-size: 13px; }
+  </style>
+</head>
+<body>
+
+<!-- 悬浮监控面板 -->
+<div id="panel">
+  <div id="panel-header">
+    <h3>实时地震监控系统</h3>
+    <span>按住此栏拖动</span>
+  </div>
+  
+  <div class="search-box">
+    <select id="province-select" onchange="filterByProvince()">
+      <option value="全部">全部省份</option>
+      <option value="新疆">新疆</option>
+      <option value="四川">四川</option>
+      <option value="西藏">西藏</option>
+      <option value="云南">云南</option>
+      <option value="青海">青海</option>
+      <option value="甘肃">甘肃</option>
+    </select>
+    <input id="ai-input" placeholder="例：喀什基准台周边500公里内近十天的地震" value="喀什基准台周边500公里内近十天的地震"/>
+    <button onclick="askAI()">智能查询</button>
+  </div>
+  
+  <div id="ai-result"></div>
+  
+  <div id="list-container">
+    <div id="events-list"><div class="empty-msg">正在加载数据...</div></div>
+  </div>
+</div>
+
+<!-- 地图容器 -->
+<div id="map"></div>
+
+<!-- 【重要替换】：引入国内极速 CDN 的 JS 库 -->
+<script src="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
+
+<script>
+  // ================= 1. 初始化地图与图层 =================
+  const map = L.map('map').setView([35, 105], 4);
+  
+  // 【重要替换】：更换为高德官方最稳的固定节点地图源（避开轮询服务器的超时问题）
+  L.tileLayer('https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', {
+    attribution: '&copy; 高德地图'
+  }).addTo(map);
+
+  const stationLayer = L.layerGroup().addTo(map);
+  const clusterGroup = L.markerClusterGroup({
+    maxClusterRadius: 40,
+    spiderfyOnMaxZoom: false,
+    showCoverageOnHover: false
+  });
+  map.addLayer(clusterGroup);
+
+  // ================= 2. 拖拽逻辑 =================
+  const panel = document.getElementById('panel');
+  const header = document.getElementById('panel-header');
+  let isDragging = false, startX, startY, startLeft, startTop;
+
+  header.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    startX = e.clientX; startY = e.clientY;
+    startLeft = panel.offsetLeft; startTop = panel.offsetTop;
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    panel.style.left = `${startLeft + (e.clientX - startX)}px`;
+    panel.style.top = `${startTop + (e.clientY - startY)}px`;
+  });
+  document.addEventListener('mouseup', () => { isDragging = false; });
+
+  // ================= 3. 数据加载与渲染 =================
+  function loadStations(province) {
+    let url = 'http://127.0.0.1:8000/stations';
+    if (province && province !== '全部') {
+        url += `?province=${encodeURIComponent(province)}`;
+    }
+    fetch(url).then(r => r.json()).then(data => {
+      stationLayer.clearLayers(); 
+      data.features.forEach(f => {
+        const [lon, lat] = f.geometry.coordinates;
+        const p = f.properties;
+        L.circleMarker([lat, lon], { radius: 6, color: '#fff', weight: 2, fillColor: '#409eff', fillOpacity: 1 })
+          .bindPopup(`<b>${p.name}</b><br>类型：${p.type}<br>仪器：${p.instrument}<br>IP：${p.ip}`)
+          .addTo(stationLayer);
+      });
+    });
+  }
+
+  function renderEvents(data) {
+    clusterGroup.clearLayers();
+    const list = document.getElementById('events-list');
+    list.innerHTML = '';
+    
+    if (!data.features || data.features.length === 0) {
+        list.innerHTML = '<div class="empty-msg">该范围内暂无地震记录</div>';
+        return;
+    }
+
+    data.features.forEach(f => {
+      const [lon, lat] = f.geometry.coordinates;
+      const p = f.properties;
+      const placeName = p.place || `东经${lon.toFixed(1)}° 北纬${lat.toFixed(1)}°`;
+      
+      const radius = Math.max(4, p.mag * 2.5);
+      const color = p.mag >= 5 ? '#f56c6c' : p.mag >= 3 ? '#e6a23c' : '#67c23a';
+      
+      L.circleMarker([lat, lon], { radius, color: color, fillColor: color, fillOpacity: 0.8, weight: 1 })
+        .bindPopup(`<b>M${p.mag}</b><br>${placeName}<br>${p.time}`)
+        .addTo(clusterGroup);
+        
+      let magClass = p.mag >= 5 ? 'mag-high' : p.mag >= 3 ? 'mag-mid' : 'mag-low';
+      list.innerHTML += `
+        <div class="event-item">
+            <span class="mag-tag ${magClass}">M${p.mag}</span>
+            <span style="flex:1; margin: 0 10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${placeName}</span>
+            <span class="coord">${p.time.substring(5, 16)}</span>
+        </div>
+      `;
+    });
+  }
+
+  // ================= 4. 业务交互逻辑 =================
+  function filterByProvince() {
+    const province = document.getElementById('province-select').value;
+    document.getElementById('ai-result').innerHTML = `<span style="color:#409eff">正在展示 <b>${province}</b> 的数据</span>`;
+    loadStations(province);
+    
+    let url = 'http://127.0.0.1:8000/events';
+    if (province !== '全部') {
+        url += `?province=${encodeURIComponent(province)}`;
+    }
+    fetch(url).then(r => r.json()).then(renderEvents);
+  }
+
+  async function askAI() {
+    const inputText = document.getElementById('ai-input').value;
+    const resultDiv = document.getElementById('ai-result');
+    resultDiv.innerHTML = '<span style="color:#e6a23c">正在请求 DeepSeek 解析意图...</span>';
+
+    try {
+      const res = await fetch('http://127.0.0.1:8000/ai-query', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: inputText})
+      });
+      const data = await res.json();
+      
+      if (data.error) {
+        resultDiv.innerHTML = `<span style="color:#f56c6c">出错：${data.error}</span>`;
+        return;
+      }
+      
+      resultDiv.innerHTML = `解析成功：台站=<b>${data.params.station_name}</b> | 半径=<b>${data.params.radius_km}km</b> | 天数=<b>${data.params.days}天</b>`;
+      
+      const stName = data.params.station_name;
+      if (stName.includes('喀什') || stName.includes('乌鲁木齐') || stName.includes('和田') || stName.includes('库尔勒') || stName.includes('伊宁')) loadStations('新疆');
+      else if (stName.includes('成都') || stName.includes('西昌')) loadStations('四川');
+      else if (stName.includes('昆明') || stName.includes('大理')) loadStations('云南');
+      else if (stName.includes('拉萨')) loadStations('西藏');
+      else loadStations('全部');
+      
+      if (data.events) renderEvents(data.events);
+      
+    } catch (error) {
+      resultDiv.innerHTML = `<span style="color:#f56c6c">请求失败，请确保后端 uvicorn 已启动。</span>`;
+    }
+  }
+
+  // ================= 5. 初始化 =================
+  window.onload = () => {
+    loadStations('全部');
+    fetch('http://127.0.0.1:8000/events').then(r => r.json()).then(renderEvents);
+  };
+</script>
+</body>
+</html>
